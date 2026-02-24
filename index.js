@@ -13,27 +13,19 @@ const UPSTREAM_FREESHIP_VOUCHERS =
 const UPSTREAM_SAVE_VOUCHER =
   process.env.UPSTREAM_SAVE_VOUCHER || 'https://api.autopee.com/shopee/save-voucher';
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '*';
-const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME || 'save100_sid';
-const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS || 21600);
 const MONGODB_URI = process.env.MONGODB_URI;
 const MONGODB_DB_NAME = process.env.MONGODB_DB_NAME || 'saveVoucher';
 const MONGODB_COLLECTION_NAME = process.env.MONGODB_COLLECTION_NAME || 'account';
 
 let mongoStatus = 'disconnected';
 let mongoClient;
-const cookieSessionStore = new Map();
 
 app.use(express.json({ limit: '1mb' }));
 
 app.use((req, res, next) => {
-  const requestOrigin = req.headers.origin;
-  const allowOrigin = FRONTEND_ORIGIN === '*' && requestOrigin ? requestOrigin : FRONTEND_ORIGIN;
-
-  res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+  res.setHeader('Access-Control-Allow-Origin', FRONTEND_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Vary', 'Origin');
 
   if (req.method === 'OPTIONS') {
     return res.status(204).end();
@@ -70,82 +62,6 @@ async function fetchUpstreamJson(url, label) {
   }
 }
 
-function normalizeCookieValue(input) {
-  const value = String(input ?? '').trim();
-  if (!value) return '';
-  if (value.startsWith('SPC_ST=')) return value;
-  return `SPC_ST=${value}`;
-}
-
-function parseCookieHeader(cookieHeader) {
-  const parsed = {};
-  const source = String(cookieHeader || '');
-  if (!source) return parsed;
-
-  for (const part of source.split(';')) {
-    const [rawKey, ...rawValue] = part.trim().split('=');
-    if (!rawKey) continue;
-    parsed[rawKey] = decodeURIComponent(rawValue.join('=') || '');
-  }
-
-  return parsed;
-}
-
-function setSessionIdCookie(req, res, sessionId) {
-  const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
-  const securePart = isSecure ? '; Secure' : '';
-  const cookieValue = `${SESSION_COOKIE_NAME}=${encodeURIComponent(
-    sessionId
-  )}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}${securePart}`;
-  res.setHeader('Set-Cookie', cookieValue);
-}
-
-function getSessionId(req) {
-  const cookies = parseCookieHeader(req.headers.cookie);
-  const raw = cookies[SESSION_COOKIE_NAME];
-  return raw ? String(raw) : '';
-}
-
-function getOrCreateSessionId(req, res) {
-  const existing = getSessionId(req);
-  if (existing) {
-    setSessionIdCookie(req, res, existing);
-    return existing;
-  }
-
-  const generated = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
-  setSessionIdCookie(req, res, generated);
-  return generated;
-}
-
-function saveSessionCookie(req, res, cookieValue) {
-  const normalizedCookie = normalizeCookieValue(cookieValue);
-  if (!normalizedCookie) return '';
-
-  const sessionId = getOrCreateSessionId(req, res);
-  cookieSessionStore.set(sessionId, {
-    cookie: normalizedCookie,
-    expiresAt: Date.now() + SESSION_TTL_SECONDS * 1000,
-  });
-
-  return sessionId;
-}
-
-function getSessionCookie(req) {
-  const sessionId = getSessionId(req);
-  if (!sessionId) return '';
-
-  const entry = cookieSessionStore.get(sessionId);
-  if (!entry) return '';
-
-  if (Date.now() > entry.expiresAt) {
-    cookieSessionStore.delete(sessionId);
-    return '';
-  }
-
-  return entry.cookie;
-}
-
 function normalizeFreeshipVoucher(raw) {
   if (!raw || typeof raw !== 'object') return null;
   if (raw.hasExpired === true || raw.disabled === true || raw.hidden === true) return null;
@@ -161,69 +77,8 @@ function normalizeFreeshipVoucher(raw) {
     voucherIdString: String(promotionId),
     voucherCode: String(voucherCode),
     userSignature: String(signature),
-    client_id: `freeship:${String(promotionId)}`,
     lastUpdated: raw.updatedAt || raw.lastUpdated || null,
   };
-}
-
-function normalizeVoucherForSave(raw, fallbackClientId) {
-  if (!raw || typeof raw !== 'object') return null;
-
-  const promotionid = raw.promotionid ?? raw.promotionId ?? raw.voucherIdString ?? raw.id;
-  const voucher_code = raw.voucher_code ?? raw.voucherCode ?? raw.code;
-  const signature = raw.signature ?? raw.userSignature;
-
-  if (!promotionid || !voucher_code || !signature) return null;
-
-  return {
-    client_id: String(raw.client_id ?? raw.clientId ?? fallbackClientId ?? ''),
-    promotionid: String(promotionid),
-    voucher_code: String(voucher_code),
-    signature: String(signature),
-  };
-}
-
-async function loadMergedVoucherConfigs() {
-  const [baseConfigs, freeshipPayload] = await Promise.all([
-    fetchUpstreamJson(UPSTREAM_VOUCHER_CONFIGS, 'voucher configs'),
-    fetchUpstreamJson(UPSTREAM_FREESHIP_VOUCHERS, 'freeship vouchers'),
-  ]);
-
-  const mergedConfigs =
-    baseConfigs && typeof baseConfigs === 'object' && !Array.isArray(baseConfigs) ? { ...baseConfigs } : {};
-
-  for (const [key, value] of Object.entries(mergedConfigs)) {
-    if (key === 'freeship_vouchers') continue;
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      mergedConfigs[key] = { ...value, client_id: String(value.client_id ?? key) };
-    }
-  }
-
-  const freeshipList = Array.isArray(freeshipPayload?.data) ? freeshipPayload.data : [];
-  mergedConfigs.freeship_vouchers = freeshipList.map(normalizeFreeshipVoucher).filter(Boolean);
-
-  return mergedConfigs;
-}
-
-function findVoucherByClientId(configs, clientId) {
-  if (!clientId || !configs || typeof configs !== 'object') return null;
-
-  for (const [key, value] of Object.entries(configs)) {
-    if (key === 'freeship_vouchers' && Array.isArray(value)) {
-      for (const item of value) {
-        const normalized = normalizeVoucherForSave(item, item?.client_id);
-        if (normalized && normalized.client_id === clientId) return normalized;
-      }
-      continue;
-    }
-
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      const normalized = normalizeVoucherForSave(value, key);
-      if (normalized && normalized.client_id === clientId) return normalized;
-    }
-  }
-
-  return null;
 }
 
 async function connectMongo() {
@@ -253,7 +108,16 @@ async function connectMongo() {
 
 app.get('/api/voucher-configs', async (_req, res) => {
   try {
-    const mergedConfigs = await loadMergedVoucherConfigs();
+    const [baseConfigs, freeshipPayload] = await Promise.all([
+      fetchUpstreamJson(UPSTREAM_VOUCHER_CONFIGS, 'voucher configs'),
+      fetchUpstreamJson(UPSTREAM_FREESHIP_VOUCHERS, 'freeship vouchers'),
+    ]);
+
+    const mergedConfigs =
+      baseConfigs && typeof baseConfigs === 'object' && !Array.isArray(baseConfigs) ? { ...baseConfigs } : {};
+    const freeshipList = Array.isArray(freeshipPayload?.data) ? freeshipPayload.data : [];
+
+    mergedConfigs.freeship_vouchers = freeshipList.map(normalizeFreeshipVoucher).filter(Boolean);
 
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60, stale-while-revalidate=300');
@@ -261,66 +125,6 @@ app.get('/api/voucher-configs', async (_req, res) => {
   } catch (err) {
     return res.status(502).json({
       message: 'Cannot load voucher configs from upstream',
-      error: err?.message || 'Unknown error',
-    });
-  }
-});
-
-app.post('/api/session/cookie', (req, res) => {
-  const normalizedCookie = normalizeCookieValue(req.body?.cookie);
-
-  if (!normalizedCookie) {
-    return res.status(400).json({ message: 'Missing cookie value.' });
-  }
-
-  saveSessionCookie(req, res, normalizedCookie);
-  return res.status(200).json({ ok: true });
-});
-
-app.post('/api/save-voucher/:clientId', async (req, res) => {
-  try {
-    const clientId = String(req.params?.clientId || '').trim();
-    if (!clientId) {
-      return res.status(400).json({ message: 'Missing voucher client id.' });
-    }
-
-    const savedCookie = getSessionCookie(req);
-    if (!savedCookie) {
-      return res.status(401).json({
-        message: 'Cookie session missing or expired. Please re-enter cookie.',
-      });
-    }
-
-    const mergedConfigs = await loadMergedVoucherConfigs();
-    const voucher = findVoucherByClientId(mergedConfigs, clientId);
-
-    if (!voucher) {
-      return res.status(404).json({ message: 'Voucher not found from current configs.' });
-    }
-
-    const upstream = await fetchUpstream(UPSTREAM_SAVE_VOUCHER, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json,text/plain,*/*',
-        'User-Agent': 'save100-express-proxy/1.0',
-      },
-      body: JSON.stringify({
-        cookie: savedCookie,
-        signature: voucher.signature,
-        voucher_code: voucher.voucher_code.trim(),
-        voucher_promotionid: voucher.promotionid,
-      }),
-    });
-
-    const body = await upstream.text();
-    const contentType = upstream.headers.get('content-type') || 'application/json; charset=utf-8';
-
-    res.setHeader('Content-Type', contentType);
-    return res.status(upstream.status).send(body);
-  } catch (err) {
-    return res.status(502).json({
-      message: 'Cannot save voucher through upstream',
       error: err?.message || 'Unknown error',
     });
   }
