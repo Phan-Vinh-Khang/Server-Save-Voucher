@@ -62,13 +62,18 @@ async function fetchUpstreamJson(url, label) {
   }
 }
 
-function normalizeFreeshipVoucher(raw) {
+function normalizeFreeshipVoucher(raw, options = {}) {
   if (!raw || typeof raw !== 'object') return null;
-  if (raw.hasExpired === true || raw.disabled === true || raw.hidden === true) return null;
+  const { requireNotExpired = false } = options;
+
+  if (requireNotExpired && raw.has_expired !== false) return null;
+  if (raw.hasExpired === true || raw.has_expired === true || raw.disabled === true || raw.hidden === true) {
+    return null;
+  }
 
   const promotionId = raw.promotionId ?? raw.promotionid ?? raw.voucherIdString;
   const voucherCode = raw.voucherCode ?? raw.voucher_code;
-  const signature = raw.signature ?? raw.userSignature;
+  const signature = raw.signature ?? raw.userSignature ?? raw.user_signature;
 
   if (!promotionId || !voucherCode || !signature) return null;
 
@@ -116,8 +121,18 @@ app.get('/api/voucher-configs', async (_req, res) => {
     const mergedConfigs =
       baseConfigs && typeof baseConfigs === 'object' && !Array.isArray(baseConfigs) ? { ...baseConfigs } : {};
     const freeshipList = Array.isArray(freeshipPayload?.data) ? freeshipPayload.data : [];
+    const otisFreeshipList = Array.isArray(mergedConfigs.freeship_vouchers)
+      ? mergedConfigs.freeship_vouchers
+      : [];
 
-    mergedConfigs.freeship_vouchers = freeshipList.map(normalizeFreeshipVoucher).filter(Boolean);
+    const autopeeFreeshipVouchers = freeshipList
+      .map((item) => normalizeFreeshipVoucher(item, { requireNotExpired: true }))
+      .filter(Boolean);
+    const otisFreeshipVouchers = otisFreeshipList.map((item) => normalizeFreeshipVoucher(item)).filter(Boolean);
+
+    mergedConfigs.freeship_vouchers = autopeeFreeshipVouchers.length
+      ? autopeeFreeshipVouchers
+      : otisFreeshipVouchers;
 
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60, stale-while-revalidate=300');
