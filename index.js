@@ -8,8 +8,6 @@ const app = express();
 const PORT = Number(process.env.PORT || 5000);
 const UPSTREAM_VOUCHER_CONFIGS =
   process.env.UPSTREAM_VOUCHER_CONFIGS || 'https://otistx.com/api/x7k9m2p4/voucher-configs';
-const UPSTREAM_FREESHIP_VOUCHERS =
-  process.env.UPSTREAM_FREESHIP_VOUCHERS || 'https://api.autopee.com/shopee/freeships?limit=200';
 const UPSTREAM_SAVE_VOUCHER =
   process.env.UPSTREAM_SAVE_VOUCHER || 'https://api.autopee.com/shopee/save-voucher';
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '*';
@@ -62,30 +60,6 @@ async function fetchUpstreamJson(url, label) {
   }
 }
 
-function normalizeFreeshipVoucher(raw, options = {}) {
-  if (!raw || typeof raw !== 'object') return null;
-  const { requireNotExpired = false } = options;
-
-  if (requireNotExpired && raw.has_expired !== false) return null;
-  if (raw.hasExpired === true || raw.has_expired === true || raw.disabled === true || raw.hidden === true) {
-    return null;
-  }
-
-  const promotionId = raw.promotionId ?? raw.promotionid ?? raw.voucherIdString;
-  const voucherCode = raw.voucherCode ?? raw.voucher_code;
-  const signature = raw.signature ?? raw.userSignature ?? raw.user_signature;
-
-  if (!promotionId || !voucherCode || !signature) return null;
-
-  return {
-    benefitName: raw.benefitName || raw.voucherName || raw.voucherCode || 'Voucher Freeship',
-    voucherIdString: String(promotionId),
-    voucherCode: String(voucherCode),
-    userSignature: String(signature),
-    lastUpdated: raw.updatedAt || raw.lastUpdated || null,
-  };
-}
-
 async function connectMongo() {
   if (!MONGODB_URI) {
     throw new Error('Missing MONGODB_URI in environment variables.');
@@ -113,26 +87,9 @@ async function connectMongo() {
 
 app.get('/api/voucher-configs', async (_req, res) => {
   try {
-    const [baseConfigs, freeshipPayload] = await Promise.all([
-      fetchUpstreamJson(UPSTREAM_VOUCHER_CONFIGS, 'voucher configs'),
-      fetchUpstreamJson(UPSTREAM_FREESHIP_VOUCHERS, 'freeship vouchers'),
-    ]);
-
+    const baseConfigs = await fetchUpstreamJson(UPSTREAM_VOUCHER_CONFIGS, 'voucher configs');
     const mergedConfigs =
       baseConfigs && typeof baseConfigs === 'object' && !Array.isArray(baseConfigs) ? { ...baseConfigs } : {};
-    const freeshipList = Array.isArray(freeshipPayload?.data) ? freeshipPayload.data : [];
-    const otisFreeshipList = Array.isArray(mergedConfigs.freeship_vouchers)
-      ? mergedConfigs.freeship_vouchers
-      : [];
-
-    const autopeeFreeshipVouchers = freeshipList
-      .map((item) => normalizeFreeshipVoucher(item, { requireNotExpired: true }))
-      .filter(Boolean);
-    const otisFreeshipVouchers = otisFreeshipList.map((item) => normalizeFreeshipVoucher(item)).filter(Boolean);
-
-    mergedConfigs.freeship_vouchers = autopeeFreeshipVouchers.length
-      ? autopeeFreeshipVouchers
-      : otisFreeshipVouchers;
 
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60, stale-while-revalidate=300');
@@ -169,7 +126,6 @@ app.post('/api/save-voucher', async (req, res) => {
     });
   }
 });
-
 app.get('/api/health', (_req, res) => {
   res.status(200).json({ ok: true, mongo: mongoStatus });
 });
