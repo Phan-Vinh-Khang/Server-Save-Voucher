@@ -1,6 +1,5 @@
 const dotenv = require('dotenv');
 const express = require('express');
-const { MongoClient } = require('mongodb');
 
 dotenv.config();
 
@@ -11,12 +10,8 @@ const UPSTREAM_VOUCHER_CONFIGS =
 const UPSTREAM_SAVE_VOUCHER =
   process.env.UPSTREAM_SAVE_VOUCHER || 'https://api.autopee.com/shopee/save-voucher';
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '*';
-const MONGODB_URI = process.env.MONGODB_URI;
-const MONGODB_DB_NAME = process.env.MONGODB_DB_NAME || 'saveVoucher';
-const MONGODB_COLLECTION_NAME = process.env.MONGODB_COLLECTION_NAME || 'account';
 
-let mongoStatus = 'disconnected';
-let mongoClient;
+const mongoStatus = 'disabled';
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -58,31 +53,6 @@ async function fetchUpstreamJson(url, label) {
   } catch (_err) {
     throw new Error(`Invalid JSON from ${label}`);
   }
-}
-
-async function connectMongo() {
-  if (!MONGODB_URI) {
-    throw new Error('Missing MONGODB_URI in environment variables.');
-  }
-
-  mongoClient = new MongoClient(MONGODB_URI);
-  await mongoClient.connect();
-
-  const db = mongoClient.db(MONGODB_DB_NAME);
-
-  try {
-    await db.createCollection(MONGODB_COLLECTION_NAME);
-    console.log(`Created collection: ${MONGODB_DB_NAME}.${MONGODB_COLLECTION_NAME}`);
-  } catch (err) {
-    if (err?.code === 48 || err?.codeName === 'NamespaceExists') {
-      console.log(`Collection already exists: ${MONGODB_DB_NAME}.${MONGODB_COLLECTION_NAME}`);
-    } else {
-      throw err;
-    }
-  }
-
-  mongoStatus = 'connected';
-  console.log(`Connected MongoDB and ready DB: ${MONGODB_DB_NAME}`);
 }
 
 app.get('/api/voucher-configs', async (_req, res) => {
@@ -130,23 +100,10 @@ app.get('/api/health', (_req, res) => {
   res.status(200).json({ ok: true, mongo: mongoStatus });
 });
 
-async function startServer() {
-  try {
-    await connectMongo();
-    app.listen(PORT, () => {
-      console.log(`save100 backend listening on http://localhost:${PORT}`);
-    });
-  } catch (err) {
-    console.error('MongoDB connection failed:', err?.message || err);
-    process.exit(1);
-  }
+function startServer() {
+  app.listen(PORT, () => {
+    console.log(`save100 backend listening on http://localhost:${PORT}`);
+  });
 }
-
-process.on('SIGINT', async () => {
-  if (mongoClient) {
-    await mongoClient.close();
-  }
-  process.exit(0);
-});
 
 startServer();
